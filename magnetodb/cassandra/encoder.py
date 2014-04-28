@@ -5,7 +5,7 @@ import sys
 import types
 from uuid import UUID
 
-from cassandra.util import OrderedDict
+from magnetodb.cassandra.util import OrderedDict
 
 
 def cql_quote(term):

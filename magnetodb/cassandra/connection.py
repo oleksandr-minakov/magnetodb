@@ -6,7 +6,7 @@ from Queue import Queue
 
 from cassandra import ConsistencyLevel, AuthenticationFailed, OperationTimedOut
 from cassandra.marshal import int8_unpack, int32_pack
-from cassandra.decoder import (ReadyMessage, AuthenticateMessage, OptionsMessage,
+from magnetodb.cassandra.decoder import (ReadyMessage, AuthenticateMessage, OptionsMessage,
                                StartupMessage, ErrorMessage, CredentialsMessage,
                                QueryMessage, ResultMessage, decode_response,
                                InvalidRequestException, SupportedMessage)

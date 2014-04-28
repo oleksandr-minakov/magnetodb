@@ -3,7 +3,6 @@ This module houses the main classes you will interact with,
 :class:`.Cluster` and :class:`.Session`.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import socket
 import sys
@@ -12,18 +11,22 @@ from threading import Lock, RLock, Thread, Event
 import Queue
 import weakref
 from weakref import WeakValueDictionary
+
+from concurrent.futures import ThreadPoolExecutor
+
+
 try:
     from weakref import WeakSet
 except ImportError:
-    from cassandra.util import WeakSet  # NOQA
+    from magnetodb.cassandra.util import WeakSet  # NOQA
 
 from functools import partial, wraps
 from itertools import groupby
 
-from cassandra import (ConsistencyLevel, AuthenticationFailed,
+from magnetodb.cassandra import (ConsistencyLevel, AuthenticationFailed,
                        OperationTimedOut, UnsupportedOperation)
-from cassandra.connection import ConnectionException, ConnectionShutdown
-from cassandra.decoder import (QueryMessage, ResultMessage,
+from magnetodb.cassandra.connection import ConnectionException, ConnectionShutdown
+from magnetodb.cassandra.decoder import (QueryMessage, ResultMessage,
                                ErrorMessage, ReadTimeoutErrorMessage,
                                WriteTimeoutErrorMessage,
                                UnavailableErrorMessage,
@@ -34,22 +37,22 @@ from cassandra.decoder import (QueryMessage, ResultMessage,
                                BatchMessage, RESULT_KIND_PREPARED,
                                RESULT_KIND_SET_KEYSPACE, RESULT_KIND_ROWS,
                                RESULT_KIND_SCHEMA_CHANGE)
-from cassandra.metadata import Metadata
-from cassandra.metrics import Metrics
-from cassandra.policies import (RoundRobinPolicy, SimpleConvictionPolicy,
+from magnetodb.cassandra.metadata import Metadata
+from magnetodb.cassandra.metrics import Metrics
+from magnetodb.cassandra.policies import (RoundRobinPolicy, SimpleConvictionPolicy,
                                 ExponentialReconnectionPolicy, HostDistance,
                                 RetryPolicy)
-from cassandra.pool import (_ReconnectionHandler, _HostReconnectionHandler,
+from magnetodb.cassandra.pool import (_ReconnectionHandler, _HostReconnectionHandler,
                             HostConnectionPool)
-from cassandra.query import (SimpleStatement, PreparedStatement, BoundStatement,
+from magnetodb.cassandra.query import (SimpleStatement, PreparedStatement, BoundStatement,
                              BatchStatement, bind_params, QueryTrace, Statement,
                              named_tuple_factory, dict_factory)
 
 # libev is all around faster, so we want to try and default to using that when we can
 try:
-    from cassandra.io.libevreactor import LibevConnection as DefaultConnection
+    from magnetodb.cassandra.io.libevreactor import LibevConnection as DefaultConnection
 except ImportError:
-    from cassandra.io.asyncorereactor import AsyncoreConnection as DefaultConnection  # NOQA
+    from magnetodb.cassandra.io.asyncorereactor import AsyncoreConnection as DefaultConnection  # NOQA
 
 # Forces load of utf8 encoding module to avoid deadlock that occurs
 # if code that is being imported tries to import the module in a seperate
@@ -123,7 +126,7 @@ class Cluster(object):
 
     Example usage::
 
-        >>> from cassandra.cluster import Cluster
+        >>> from magnetodb.cassandra.cluster import Cluster
         >>> cluster = Cluster(['192.168.1.1', '192.168.1.2'])
         >>> session = cluster.connect()
         >>> session.execute("CREATE KEYSPACE ...")

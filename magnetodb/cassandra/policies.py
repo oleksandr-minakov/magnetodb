@@ -3,7 +3,8 @@ import logging
 from random import randint
 from threading import Lock
 
-from cassandra import ConsistencyLevel
+from magnetodb.cassandra import ConsistencyLevel
+
 
 log = logging.getLogger(__name__)
 

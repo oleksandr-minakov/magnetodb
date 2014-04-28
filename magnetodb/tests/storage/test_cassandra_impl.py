@@ -13,14 +13,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import json
-
 import unittest
 import uuid
 import binascii
 
 from magnetodb.common.cassandra import cluster
-from cassandra import query
-
+from magnetodb.cassandra import query
 from magnetodb.storage import models
 from magnetodb.storage.impl import cassandra_impl as impl
 

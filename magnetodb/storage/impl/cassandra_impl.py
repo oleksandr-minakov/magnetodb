@@ -18,17 +18,17 @@ import json
 import binascii
 import time
 
-from cassandra import query, ConsistencyLevel
-from cassandra.query import SimpleStatement
+from magnetodb.cassandra import query, ConsistencyLevel
+from magnetodb.cassandra.query import SimpleStatement
 from magnetodb.common.cassandra.cluster import Cluster
 from magnetodb.common.cassandra.cluster import NoHostAvailable
-
 from magnetodb.common.exception import BackendInteractionException
 from magnetodb.common.exception import TableNotExistsException
 from magnetodb.common.exception import TableAlreadyExistsException
 from magnetodb.openstack.common import importutils
 from magnetodb.openstack.common import log as logging
 from magnetodb.storage import models
+
 
 LOG = logging.getLogger(__name__)
 

@@ -1,29 +1,16 @@
 from collections import defaultdict, deque
-from functools import partial, wraps
+from functools import partial
 import logging
 import os
 import socket
+import sys
 from threading import Event, Lock, Thread
 import time
 import traceback
 import Queue
+from errno import EALREADY, EINPROGRESS, EWOULDBLOCK, EINVAL, EISCONN, errorcode
 
-from cassandra import OperationTimedOut
-from cassandra.connection import (Connection, ResponseWaiter, ConnectionShutdown,
-                                  ConnectionBusy, NONBLOCKING,
-                                  MAX_STREAM_PER_CONNECTION)
-from cassandra.decoder import RegisterMessage
-from cassandra.marshal import int32_unpack
-try:
-    import cassandra.io.libevwrapper as libev
-except ImportError:
-    raise ImportError(
-        "The C extension needed to use libev was not found.  This "
-        "probably means that you didn't have the required build dependencies "
-        "when installing the driver.  See "
-        "http://datastax.github.io/python-driver/installation.html#c-extensions "
-        "for instructions on installing build dependencies and building "
-        "the C extension.")
+import asyncore
 
 try:
     from cStringIO import StringIO
@@ -33,86 +20,74 @@ except ImportError:
 try:
     import ssl
 except ImportError:
-    ssl = None # NOQA
+    ssl = None  # NOQA
+
+from magnetodb.cassandra import OperationTimedOut
+from magnetodb.cassandra.connection import (Connection, ResponseWaiter, ConnectionShutdown,
+                                  ConnectionBusy, ConnectionException, NONBLOCKING,
+                                  MAX_STREAM_PER_CONNECTION)
+from magnetodb.cassandra.decoder import RegisterMessage
+from magnetodb.cassandra.marshal import int32_unpack
 
 log = logging.getLogger(__name__)
 
-_loop = libev.Loop()
-_loop_notifier = libev.Async(_loop)
-_loop_notifier.start()
-
-# prevent _loop_notifier from keeping the loop from returning
-_loop.unref()
-
-_loop_started = None
+_loop_started = False
 _loop_lock = Lock()
+
+_starting_conns = set()
+_starting_conns_lock = Lock()
 
 
 def _run_loop():
-    while True:
-        end_condition = _loop.start()
-        # there are still active watchers, no deadlock
-        with _loop_lock:
-            if end_condition:
-                log.debug("Restarting event loop")
-                continue
-            else:
-                # all Connections have been closed, no active watchers
-                log.debug("All Connections currently closed, event loop ended")
-                global _loop_started
-                _loop_started = False
+    global _loop_started
+    log.debug("Starting asyncore event loop")
+    with _loop_lock:
+        while True:
+            try:
+                asyncore.loop(timeout=0.001, use_poll=True, count=None)
+            except Exception:
+                log.debug("Asyncore event loop stopped unexepectedly", exc_info=True)
                 break
+
+            with _starting_conns_lock:
+                if not _starting_conns:
+                    break
+
+        _loop_started = False
+        if log:
+            # this can happen during interpreter shutdown
+            log.debug("Asyncore event loop ended")
 
 
 def _start_loop():
     global _loop_started
     should_start = False
-    with _loop_lock:
-        if not _loop_started:
-            log.debug("Starting libev event loop")
+    did_acquire = False
+    try:
+        did_acquire = _loop_lock.acquire(False)
+        if did_acquire and not _loop_started:
             _loop_started = True
             should_start = True
+    finally:
+        if did_acquire:
+            _loop_lock.release()
 
     if should_start:
         t = Thread(target=_run_loop, name="event_loop")
         t.daemon = True
         t.start()
 
-    return should_start
 
-
-def defunct_on_error(f):
-
-    @wraps(f)
-    def wrapper(self, *args, **kwargs):
-        try:
-            return f(self, *args, **kwargs)
-        except Exception as exc:
-            self.defunct(exc)
-
-    return wrapper
-
-
-class LibevConnection(Connection):
+class AsyncoreConnection(Connection, asyncore.dispatcher):
     """
-    An implementation of :class:`.Connection` that uses libev for its event loop.
+    An implementation of :class:`.Connection` that uses the ``asyncore``
+    module in the Python standard library for its event loop.
     """
-
-    # class-level set of all connections; only replaced with a new copy
-    # while holding _conn_set_lock, never modified in place
-    _live_conns = set()
-    # newly created connections that need their write/read watcher started
-    _new_conns = set()
-    # recently closed connections that need their write/read watcher stopped
-    _closed_conns = set()
-    _conn_set_lock = Lock()
-
-    _write_watcher_is_active = False
 
     _total_reqd_bytes = 0
-    _read_watcher = None
-    _write_watcher = None
-    _socket = None
+    _writable = False
+    _readable = False
+    _have_listeners = False
 
     @classmethod
     def factory(cls, *args, **kwargs):
@@ -123,74 +98,13 @@ class LibevConnection(Connection):
             raise conn.last_error
         elif not conn.connected_event.is_set():
             conn.close()
-            raise OperationTimedOut("Timed out creating new connection")
+            raise OperationTimedOut("Timed out creating connection")
         else:
             return conn
 
-    @classmethod
-    def _connection_created(cls, conn):
-        with cls._conn_set_lock:
-            new_live_conns = cls._live_conns.copy()
-            new_live_conns.add(conn)
-            cls._live_conns = new_live_conns
-
-            new_new_conns = cls._new_conns.copy()
-            new_new_conns.add(conn)
-            cls._new_conns = new_new_conns
-
-    @classmethod
-    def _connection_destroyed(cls, conn):
-        with cls._conn_set_lock:
-            new_live_conns = cls._live_conns.copy()
-            new_live_conns.discard(conn)
-            cls._live_conns = new_live_conns
-
-            new_closed_conns = cls._closed_conns.copy()
-            new_closed_conns.add(conn)
-            cls._closed_conns = new_closed_conns
-
-    @classmethod
-    def loop_will_run(cls, prepare):
-        changed = False
-        for conn in cls._live_conns:
-            if not conn.deque and conn._write_watcher_is_active:
-                if conn._write_watcher:
-                    conn._write_watcher.stop()
-                conn._write_watcher_is_active = False
-                changed = True
-            elif conn.deque and not conn._write_watcher_is_active:
-                conn._write_watcher.start()
-                conn._write_watcher_is_active = True
-                changed = True
-
-        if cls._new_conns:
-            with cls._conn_set_lock:
-                to_start = cls._new_conns
-                cls._new_conns = set()
-
-            for conn in to_start:
-                conn._read_watcher.start()
-
-            changed = True
-
-        if cls._closed_conns:
-            with cls._conn_set_lock:
-                to_stop = cls._closed_conns
-                cls._closed_conns = set()
-
-            for conn in to_stop:
-                if conn._write_watcher:
-                    conn._write_watcher.stop()
-                if conn._read_watcher:
-                    conn._read_watcher.stop()
-
-            changed = True
-
-        if changed:
-            _loop_notifier.send()
-
     def __init__(self, *args, **kwargs):
         Connection.__init__(self, *args, **kwargs)
+        asyncore.dispatcher.__init__(self)
 
         self.connected_event = Event()
         self._iobuf = StringIO()
@@ -198,32 +112,51 @@ class LibevConnection(Connection):
         self._callbacks = {}
         self._push_watchers = defaultdict(set)
         self.deque = deque()
-        self._deque_lock = Lock()
+        self.deque_lock = Lock()
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        if self.ssl_options:
-            if not ssl:
-                raise Exception("This version of Python was not compiled with SSL support")
-            self._socket = ssl.wrap_socket(self._socket, **self.ssl_options)
-        self._socket.settimeout(1.0)  # TODO potentially make this value configurable
-        self._socket.connect((self.host, self.port))
-        self._socket.setblocking(0)
+        with _starting_conns_lock:
+            _starting_conns.add(self)
+
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connect((self.host, self.port))
 
         if self.sockopts:
             for args in self.sockopts:
-                self._socket.setsockopt(*args)
+                self.socket.setsockopt(*args)
 
-        with _loop_lock:
-            self._read_watcher = libev.IO(self._socket._sock, libev.EV_READ, _loop, self.handle_read)
-            self._write_watcher = libev.IO(self._socket._sock, libev.EV_WRITE, _loop, self.handle_write)
-
-        self._send_options_message()
-
-        self.__class__._connection_created(self)
+        self._writable = True
+        self._readable = True
 
         # start the global event loop if needed
         _start_loop()
-        _loop_notifier.send()
+
+    def create_socket(self, family, type):
+        # copied from asyncore, but with the line to set the socket in
+        # non-blocking mode removed (we will do that after connecting)
+        self.family_and_type = family, type
+        sock = socket.socket(family, type)
+        if self.ssl_options:
+            if not ssl:
+                raise Exception("This version of Python was not compiled with SSL support")
+            sock = ssl.wrap_socket(sock, **self.ssl_options)
+        self.set_socket(sock)
+
+    def connect(self, address):
+        # this is copied directly from asyncore.py, except that
+        # a timeout is set before connecting
+        self.connected = False
+        self.connecting = True
+        self.socket.settimeout(1.0)
+        err = self.socket.connect_ex(address)
+        if err in (EINPROGRESS, EALREADY, EWOULDBLOCK) \
+        or err == EINVAL and os.name in ('nt', 'ce'):
+            raise ConnectionException("Timed out connecting to %s" % (address[0]))
+        if err in (0, EISCONN):
+            self.addr = address
+            self.socket.setblocking(0)
+            self.handle_connect_event()
+        else:
+            raise socket.error(err, errorcode[err])
 
     def close(self):
         with self.lock:
@@ -232,14 +165,19 @@ class LibevConnection(Connection):
             self.is_closed = True
 
         log.debug("Closing connection (%s) to %s", id(self), self.host)
-        self.__class__._connection_destroyed(self)
-        _loop_notifier.send()
-        self._socket.close()
+        self._writable = False
+        self._readable = False
+        asyncore.dispatcher.close(self)
+        log.debug("Closed socket to %s", self.host)
 
-        # don't leave in-progress operations hanging
+        with _starting_conns_lock:
+            _starting_conns.discard(self)
+
         if not self.is_defunct:
             self._error_all_callbacks(
                 ConnectionShutdown("Connection to %s was closed" % self.host))
+            # don't leave in-progress operations hanging
+            self.connected_event.set()
 
     def defunct(self, exc):
         with self.lock:
@@ -252,7 +190,8 @@ class LibevConnection(Connection):
             log.debug("Defuncting connection (%s) to %s: %s\n%s",
                       id(self), self.host, exc, traceback.format_exc(exc))
         else:
-            log.debug("Defuncting connection (%s) to %s: %s", id(self), self.host, exc)
+            log.debug("Defuncting connection (%s) to %s: %s",
+                      id(self), self.host, exc)
 
         self.last_error = exc
         self.close()
@@ -273,49 +212,48 @@ class LibevConnection(Connection):
                          "failed connection (%s) to host %s:",
                          id(self), self.host, exc_info=True)
 
-    def handle_write(self, watcher, revents, errno=None):
-        if revents & libev.EV_ERROR:
-            if errno:
-                exc = IOError(errno, os.strerror(errno))
-            else:
-                exc = Exception("libev reported an error")
+    def handle_connect(self):
+        with _starting_conns_lock:
+            _starting_conns.discard(self)
+        self._send_options_message()
 
-            self.defunct(exc)
-            return
+    def handle_error(self):
+        self.defunct(sys.exc_info()[1])
 
+    def handle_close(self):
+        log.debug("connection (%s) to %s closed by server", id(self), self.host)
+        self.close()
+
+    def handle_write(self):
         while True:
             try:
-                with self._deque_lock:
+                with self.deque_lock:
                     next_msg = self.deque.popleft()
             except IndexError:
+                self._writable = False
                 return
 
             try:
-                sent = self._socket.send(next_msg)
+                sent = self.send(next_msg)
+                self._readable = True
             except socket.error as err:
                 if (err.args[0] in NONBLOCKING):
-                    with self._deque_lock:
+                    with self.deque_lock:
                         self.deque.appendleft(next_msg)
                 else:
                     self.defunct(err)
                 return
             else:
                 if sent < len(next_msg):
-                    with self._deque_lock:
+                    with self.deque_lock:
                         self.deque.appendleft(next_msg[sent:])
+                    if sent == 0:
+                        return
 
-    def handle_read(self, watcher, revents, errno=None):
-        if revents & libev.EV_ERROR:
-            if errno:
-                exc = IOError(errno, os.strerror(errno))
-            else:
-                exc = Exception("libev reported an error")
-
-            self.defunct(exc)
-            return
+    def handle_read(self):
         try:
             while True:
-                buf = self._socket.recv(self.in_buffer_size)
+                buf = self.recv(self.in_buffer_size)
                 self._iobuf.write(buf)
                 if len(buf) < self.in_buffer_size:
                     break
@@ -360,9 +298,9 @@ class LibevConnection(Connection):
                     else:
                         self._total_reqd_bytes = body_len + 8
                         break
-        else:
-            log.debug("Connection %s closed by server", self)
-            self.close()
+
+            if not self._callbacks:
+                self._readable = False
 
     def handle_pushed(self, response):
         log.debug("Message pushed from server: %r", response)
@@ -381,9 +319,16 @@ class LibevConnection(Connection):
         else:
             chunks = [data]
 
-        with self._deque_lock:
+        with self.deque_lock:
             self.deque.extend(chunks)
-            _loop_notifier.send()
+
+        self._writable = True
+
+    def writable(self):
+        return self._writable
+
+    def readable(self):
+        return self._readable or (self._have_listeners and not (self.is_defunct or self.is_closed))
 
     def send_msg(self, msg, cb, wait_for_id=False):
         if self.is_defunct:
@@ -442,15 +387,11 @@ class LibevConnection(Connection):
 
     def register_watcher(self, event_type, callback):
         self._push_watchers[event_type].add(callback)
+        self._have_listeners = True
         self.wait_for_response(RegisterMessage(event_list=[event_type]))
 
     def register_watchers(self, type_callback_dict):
         for event_type, callback in type_callback_dict.items():
             self._push_watchers[event_type].add(callback)
+        self._have_listeners = True
         self.wait_for_response(RegisterMessage(event_list=type_callback_dict.keys()))
-
-
-_preparer = libev.Prepare(_loop, LibevConnection.loop_will_run)
-# prevent _preparer from keeping the loop from returning
-_loop.unref()
-_preparer.start()

@@ -7,12 +7,12 @@ try:
 except ImportError:
     from StringIO import StringIO  # ignore flake8 warning: # NOQA
 
-from cassandra import (Unavailable, WriteTimeout, ReadTimeout,
+from magnetodb.cassandra import (Unavailable, WriteTimeout, ReadTimeout,
                        AlreadyExists, InvalidRequest, Unauthorized,
                        UnsupportedOperation)
-from cassandra.marshal import (int32_pack, int32_unpack, uint16_pack, uint16_unpack,
+from magnetodb.cassandra.marshal import (int32_pack, int32_unpack, uint16_pack, uint16_unpack,
                                int8_pack, int8_unpack)
-from cassandra.cqltypes import (AsciiType, BytesType, BooleanType,
+from magnetodb.cassandra.cqltypes import (AsciiType, BytesType, BooleanType,
                                 CounterColumnType, DateType, DecimalType,
                                 DoubleType, FloatType, Int32Type,
                                 InetAddressType, IntegerType, ListType,

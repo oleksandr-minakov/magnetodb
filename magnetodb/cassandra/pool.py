@@ -11,10 +11,10 @@ import weakref
 try:
     from weakref import WeakSet
 except ImportError:
-    from cassandra.util import WeakSet  # NOQA
+    from magnetodb.cassandra.util import WeakSet  # NOQA
 
-from cassandra import AuthenticationFailed
-from cassandra.connection import MAX_STREAM_PER_CONNECTION, ConnectionException
+from magnetodb.cassandra import AuthenticationFailed
+from magnetodb.cassandra.connection import MAX_STREAM_PER_CONNECTION, ConnectionException
 
 log = logging.getLogger(__name__)
 

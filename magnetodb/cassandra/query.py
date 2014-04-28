@@ -9,14 +9,14 @@ from datetime import datetime, timedelta
 import re
 import struct
 import time
+import logging
 
 from cassandra import ConsistencyLevel, OperationTimedOut
-from cassandra.cqltypes import unix_time_from_uuid1
+from magnetodb.cassandra.cqltypes import unix_time_from_uuid1
 from cassandra.encoder import (cql_encoders, cql_encode_object,
                                cql_encode_sequence)
 from cassandra.util import OrderedDict
 
-import logging
 log = logging.getLogger(__name__)
 
 

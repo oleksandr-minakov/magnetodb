@@ -14,10 +14,10 @@ try:
 except ImportError:
     pass
 
-import cassandra.cqltypes as types
-from cassandra.marshal import varint_unpack
-from cassandra.pool import Host
-from cassandra.util import OrderedDict
+import magnetodb.cassandra.cqltypes as types
+from magnetodb.cassandra.marshal import varint_unpack
+from magnetodb.cassandra.pool import Host
+from magnetodb.cassandra.util import OrderedDict
 
 log = logging.getLogger(__name__)
 

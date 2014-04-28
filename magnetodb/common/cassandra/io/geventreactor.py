@@ -1,14 +1,15 @@
 import traceback
 import time
+from collections import defaultdict
+from functools import partial
+import logging
+import os
+
 import gevent
 from gevent import select, socket
 from gevent.event import Event
 from gevent.queue import Queue
 
-from collections import defaultdict
-from functools import partial
-import logging
-import os
 
 try:
     from cStringIO import StringIO
@@ -17,11 +18,11 @@ except ImportError:
 
 from errno import EALREADY, EINPROGRESS, EWOULDBLOCK, EINVAL
 
-from cassandra import OperationTimedOut
-from cassandra.connection import Connection, ConnectionShutdown, ConnectionBusy, \
+from magnetodb.cassandra import OperationTimedOut
+from magnetodb.cassandra.connection import Connection, ConnectionShutdown, ConnectionBusy, \
     ResponseWaiter, MAX_STREAM_PER_CONNECTION
-from cassandra.decoder import RegisterMessage
-from cassandra.marshal import int32_unpack
+from magnetodb.cassandra.decoder import RegisterMessage
+from magnetodb.cassandra.marshal import int32_unpack
 
 
 log = logging.getLogger(__name__)
